@@ -28,6 +28,7 @@
 
 #include "Features/Input/DisableKeyboardHook.cpp"
 #include "Features/Input/RawMouseInput.cpp"
+#include "Features/Input/RawMouseInputDS1.cpp"
 #include "Features/Input/FilterInputDevices.cpp"
 #include "Features/Input/UseSDLControllerInput.cpp"
 
@@ -79,6 +80,13 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 				}
 
 				direct3DCreate9Hook = HookHelper::CreateHookAPI(L"d3d9.dll", "Direct3DCreate9", &Direct3DCreate9_Hook);
+
+				// The mouse capture must see the game's DirectInput devices being created,
+				// which can happen before the D3D trigger fires.
+				if (IniHelper::ReadInteger("Input", "RawMouseInput", 1) == 1)
+				{
+					InstallRawMouseInputDS1Early();
+				}
 			}
 			else
 			{
