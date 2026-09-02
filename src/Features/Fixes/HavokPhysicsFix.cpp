@@ -47,6 +47,15 @@ static void __cdecl Build1DAngularConstraintJacobian_Hook(__m128* a1, float* con
 static int __fastcall InitializePhysicsSolverParameters_Hook(float* thisp, int, float* a2, float* a3)
 {
 	g_State.frameTimeScale = TARGET_FRAME_TIME / a3[2];
+
+	// A few samples of the solver step so the scale can be checked against the frame rate
+	static int logged = 0;
+	if (logged < 5)
+	{
+		logged++;
+		LogHelper::Log("  HavokPhysicsFix: solver dt=%.5f s (%.1f Hz) -> frameTimeScale=%.3f", a3[2], a3[2] > 0 ? 1.0f / a3[2] : 0.0f, g_State.frameTimeScale);
+	}
+
 	return InitializePhysicsSolverParameters.unsafe_thiscall<int>(thisp, a2, a3);
 }
 
@@ -82,14 +91,68 @@ static int __cdecl MainLoop_Hook()
 	return MainLoop.unsafe_ccall<int>();
 }
 
+// DS1 links Havok 5.5 (DS2: 6.5). InitializePhysicsSolverParameters is byte-identical
+// between the two, and the three constraint functions have the same signatures and the
+// same struct layouts (the solver-info fields at [3] and [9], the constraint field at
+// [7]); only their codegen differs (x87 in DS1). See PLAN.md sections 5a and 6.
+static constexpr GameSig SIG_BuildContactConstraintJacobian = {
+	"55 8B EC 83 E4 F0 81 EC 24 01 00 00 53 56 57 D9 EE",  // DS1 @ 0x00877320
+	"55 8B EC 83 E4 F0 81 EC A4 00 00 00 8B 55 08",        // DS2
+};
+static constexpr GameSig SIG_SolveBallSocketChainConstraints = {
+	"55 8B EC 83 E4 F0 81 EC B4 00 00 00 8B 45 08 D9 40 1C",  // DS1 @ 0x0086EE40
+	"55 8B EC 83 E4 F0 81 EC 84 00 00 00 F3 0F 10 41 04",     // DS2
+};
+static constexpr GameSig SIG_Build1DAngularConstraintJacobian = {
+	"55 8B EC 83 E4 F0 83 EC 34 8B 4D 08 53",              // DS1 @ 0x0086AF80
+	"55 8B EC 83 E4 F0 83 EC 14 8B 45 08 53 8B 5D 10",     // DS2
+};
+static constexpr GameSig SIG_InitializePhysicsSolverParameters = {
+	"8B 44 24 04 D9 80 0C 01 00 00 D9 19",  // DS1 @ 0x00846500 (identical to DS2)
+	"8B 44 24 04 D9 80 0C 01 00 00 D9 19",  // DS2
+};
+
+// =====================
+// Dead Space 1 variant
+// =====================
+//
+// Only the function-level rescaling is applied on DS1 for now: the solver time scale
+// from InitializePhysicsSolverParameters and the three constraint-term hooks above. The
+// DS2 mid-hooks (impulse damper, constraint error scaler, mass capture / force damper /
+// timestep limiter) patch SSE registers inside Havok 6.5 solver code that has no
+// byte-level counterpart in DS1's x87 build, and ProcessEntityDeath / MainLoop only
+// feed those. Whether the function-level layer alone is enough is an empirical question.
+
+static void ApplyHavokPhysicsFixDS1(DWORD addr_BuildContact, DWORD addr_SolveBallSocket, DWORD addr_Build1DAngular, DWORD addr_InitSolver)
+{
+	BuildContactConstraintJacobian = HookHelper::CreateHook((void*)addr_BuildContact, &BuildContactConstraintJacobian_Hook);
+	SolveBallSocketChainConstraints = HookHelper::CreateHook((void*)addr_SolveBallSocket, &SolveBallSocketChainConstraints_Hook);
+	Build1DAngularConstraintJacobian = HookHelper::CreateHook((void*)addr_Build1DAngular, &Build1DAngularConstraintJacobian_Hook);
+	InitializePhysicsSolverParameters = HookHelper::CreateHook((void*)addr_InitSolver, &InitializePhysicsSolverParameters_Hook);
+
+	LogHelper::Log("  HavokPhysicsFix(DS1): function-level hooks installed (mid-hooks not ported)");
+}
+
 static void ApplyHavokPhysicsFix()
 {
 	if (!HavokPhysicsFix) return;
 
-	DWORD addr_BuildContactConstraintJacobian = ScanModuleSignature(g_State.GameModule, "55 8B EC 83 E4 F0 81 EC A4 00 00 00 8B 55 08", "BuildContactConstraintJacobian");
-	DWORD addr_SolveBallSocketChainConstraints = ScanModuleSignature(g_State.GameModule, "55 8B EC 83 E4 F0 81 EC 84 00 00 00 F3 0F 10 41 04", "SolveBallSocketChainConstraints");
-	DWORD addr_Build1DAngularConstraintJacobian = ScanModuleSignature(g_State.GameModule, "55 8B EC 83 E4 F0 83 EC 14 8B 45 08 53 8B 5D 10", "Build1DAngularConstraintJacobian");
-	DWORD addr_InitializePhysicsSolverParameters = ScanModuleSignature(g_State.GameModule, "8B 44 24 04 D9 80 0C 01 00 00 D9 19", "InitializePhysicsSolverParameters");
+	DWORD addr_BuildContactConstraintJacobian = ScanModuleSignature(g_State.GameModule, SIG_BuildContactConstraintJacobian, "BuildContactConstraintJacobian");
+	DWORD addr_SolveBallSocketChainConstraints = ScanModuleSignature(g_State.GameModule, SIG_SolveBallSocketChainConstraints, "SolveBallSocketChainConstraints");
+	DWORD addr_Build1DAngularConstraintJacobian = ScanModuleSignature(g_State.GameModule, SIG_Build1DAngularConstraintJacobian, "Build1DAngularConstraintJacobian");
+	DWORD addr_InitializePhysicsSolverParameters = ScanModuleSignature(g_State.GameModule, SIG_InitializePhysicsSolverParameters, "InitializePhysicsSolverParameters");
+
+	if (g_State.game == Game::DS1)
+	{
+		if (addr_BuildContactConstraintJacobian && addr_SolveBallSocketChainConstraints &&
+			addr_Build1DAngularConstraintJacobian && addr_InitializePhysicsSolverParameters)
+		{
+			ApplyHavokPhysicsFixDS1(addr_BuildContactConstraintJacobian, addr_SolveBallSocketChainConstraints,
+				addr_Build1DAngularConstraintJacobian, addr_InitializePhysicsSolverParameters);
+		}
+		return;
+	}
+
 	DWORD addr_ProcessEntityDeath = ScanModuleSignature(g_State.GameModule, "53 56 8B F1 8B 4C 24 18 8B C1 32 DB 83 E8 16 0F 84 17 01 00 00", "ProcessEntityDeath");
 	DWORD addr_physicsImpulseDamper = ScanModuleSignature(g_State.GameModule, "0F C6 D1 AA 0F C6 DB FF F3 0F 58 D4 0F 28 C8 0F C6 C8 FF F3 0F 5C CA F3 0F 59 CB 0F 28 E1", "physicsImpulseDamper");
 	DWORD addr_constraintErrorScaler = ScanModuleSignature(g_State.GameModule, "0F 28 16 0F 59 CA 0F 58 C3 0F 58 C1 8D 4A 10 0F 28 C8 0F C6 C8 55 F3 0F 58 C8 83 C2 20 0F C6 C0 AA F3 0F 58 C1 0F C6 D2 FF F3 0F 5C D0 F3 0F 11 94 24 30 02 00 00", "constraintErrorScaler");

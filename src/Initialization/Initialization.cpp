@@ -96,6 +96,7 @@ static void ReadConfig()
 static void InitDeadSpace1()
 {
 	// Fixes
+	ApplyHavokPhysicsFix();
 	ApplyFixSaveStringHandling();
 	ApplyVSyncRefreshRateFix();
 
@@ -105,6 +106,7 @@ static void InitDeadSpace1()
 
 	// Input
 	ApplyDisableKeyboardHook();
+	if (RawMouseInput) ApplyRawMouseInputDS1();
 
 	// Graphics
 	ApplyTextureFiltering();

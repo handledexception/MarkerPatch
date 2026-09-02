@@ -74,6 +74,25 @@ static void ApplySkipIntroDS1()
 			uint8_t* frontend = *reinterpret_cast<uint8_t**>(ctx.esp + 4);
 			if (!frontend) return;
 
+			// Frame pacing at the menu, independent of the game's limiter (which is not
+			// called at all when VSync is off). Diagnostic only; costs nothing when logging is off.
+			{
+				static LARGE_INTEGER freq = {}, last = {};
+				static int calls = 0, reports = 0;
+				if (freq.QuadPart == 0) QueryPerformanceFrequency(&freq);
+				LARGE_INTEGER now; QueryPerformanceCounter(&now);
+				if (++calls % 256 == 0 && reports < 6)
+				{
+					if (last.QuadPart)
+					{
+						double ms = (double)(now.QuadPart - last.QuadPart) * 1000.0 / (double)freq.QuadPart / 256.0;
+						LogHelper::Log("  Frontend(DS1): pacing over 256 frames: %.2f ms/frame = %.1f fps", ms, 1000.0 / ms);
+						reports++;
+					}
+					last = now;
+				}
+			}
+
 			if (*g_ds1FrontendState == DS1_STATE_INIT && frontend[DS1_FRONTEND_INTRO_DONE] == 0)
 			{
 				frontend[DS1_FRONTEND_INTRO_DONE] = 1;
