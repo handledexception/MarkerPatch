@@ -7,6 +7,7 @@
 #include <Windows.h>
 #include <d3d9.h>
 
+#include <format>
 #include <mutex>
 #include <stacktrace>
 #include <system_error>
@@ -23,11 +24,30 @@
 #pragma comment(lib, "SDL3-static.lib")
 
 
+// Which game this DLL has been loaded into. Detected in DllMain from the executable
+// name, falling back to the statically linked Havok version string, which differs
+// between the two titles (DS1 = Havok 5.5.0, DS2 = Havok 6.5.0).
+enum class Game
+{
+	Unknown,
+	DS1,
+	DS2,
+};
+
+// A byte pattern per game. nullptr means the feature has no known location in that
+// game, and ScanModuleSignature returns 0 for it without raising an error.
+struct GameSig
+{
+	const char* ds1;
+	const char* ds2;
+};
+
 struct GlobalState
 {
 	// System initialization
 	bool isInit = false;
 	HMODULE GameModule = NULL;
+	Game game = Game::Unknown;
 
 	bool isUALPresent = false;
 
@@ -168,9 +188,38 @@ bool EnableHackerDLC = false;
 bool EnableZealotDLC = false;
 bool EnableRivetGunDLC = false;
 
+static const char* GameName(Game game)
+{
+	switch (game)
+	{
+		case Game::DS1: return "Dead Space";
+		case Game::DS2: return "Dead Space 2";
+		default: return "Unknown";
+	}
+}
+
+static Game DetectGame(HMODULE Module)
+{
+	wchar_t path[MAX_PATH] = {};
+	GetModuleFileNameW(Module, path, MAX_PATH);
+	const std::wstring name = std::filesystem::path(path).filename().wstring();
+
+	if (_wcsicmp(name.c_str(), L"deadspace2.exe") == 0) return Game::DS2;
+	if (_wcsicmp(name.c_str(), L"dead space.exe") == 0) return Game::DS1;
+	if (_wcsicmp(name.c_str(), L"deadspace.exe") == 0) return Game::DS1;
+
+	// Renamed executable: fall back to the Havok version string each game embeds
+	if (MemoryHelper::PatternScan(Module, "48 61 76 6F 6B 2D 35 2E 35 2E 30")) return Game::DS1; // "Havok-5.5.0"
+	if (MemoryHelper::PatternScan(Module, "48 61 76 6F 6B 2D 36 2E 35 2E 30")) return Game::DS2; // "Havok-6.5.0"
+
+	return Game::Unknown;
+}
+
 static DWORD ScanModuleSignature(HMODULE Module, std::string_view Signature, const char* PatchName, int FunctionStartCheckCount = -1, bool ShowError = true)
 {
 	DWORD Address = MemoryHelper::FindSignatureAddress(Module, Signature, FunctionStartCheckCount);
+
+	LogHelper::Log("  %-36s %s", PatchName, Address ? std::format("0x{:08X}", Address).c_str() : "NOT FOUND");
 
 	if (Address == 0 && ShowError)
 	{
@@ -180,6 +229,21 @@ static DWORD ScanModuleSignature(HMODULE Module, std::string_view Signature, con
 	}
 
 	return Address;
+}
+
+// Picks the pattern for the running game. A feature with no pattern for this game
+// simply reports "not found" without an error dialog.
+static DWORD ScanModuleSignature(HMODULE Module, const GameSig& Signature, const char* PatchName, int FunctionStartCheckCount = -1, bool ShowError = true)
+{
+	const char* pattern = g_State.game == Game::DS1 ? Signature.ds1 : Signature.ds2;
+
+	if (!pattern)
+	{
+		LogHelper::Log("  %-36s not supported for %s", PatchName, GameName(g_State.game));
+		return 0;
+	}
+
+	return ScanModuleSignature(Module, std::string_view(pattern), PatchName, FunctionStartCheckCount, ShowError);
 }
 
 static std::filesystem::path BuildLongPath(const std::string& root, const std::string& relativePath)

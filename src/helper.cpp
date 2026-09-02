@@ -3,6 +3,9 @@
 #include "safetyhook/safetyhook.hpp"
 #include "dllmain.hpp"
 
+#include <cstdarg>
+#include <cstdio>
+
 namespace MemoryHelper
 {
 	template <typename T> static bool WriteMemory(uintptr_t address, T value, bool disableProtection = true)
@@ -427,6 +430,45 @@ namespace SystemHelper
 
 		// Set up proxies to system DLL
 		dinput8.ProxySetup(hOriginal);
+	}
+};
+
+namespace LogHelper
+{
+	// Optional diagnostic log (MarkerPatch.log next to the DLL), enabled by [Debug] LogFile.
+	// Records game detection, the init trigger, and every signature scan result so a
+	// boot on a new game build can be verified without attaching a debugger.
+	static bool s_enabled = false;
+	static std::string s_path;
+
+	static void Init(bool enabled)
+	{
+		s_enabled = enabled;
+		if (!enabled) return;
+
+		s_path = SystemHelper::GetModulePath() + "\\MarkerPatch.log";
+
+		FILE* file = nullptr;
+		if (fopen_s(&file, s_path.c_str(), "w") == 0 && file)
+		{
+			fclose(file);
+		}
+	}
+
+	static void Log(const char* format, ...)
+	{
+		if (!s_enabled) return;
+
+		FILE* file = nullptr;
+		if (fopen_s(&file, s_path.c_str(), "a") != 0 || !file) return;
+
+		va_list args;
+		va_start(args, format);
+		vfprintf(file, format, args);
+		va_end(args);
+
+		fputc('\n', file);
+		fclose(file);
 	}
 };
 

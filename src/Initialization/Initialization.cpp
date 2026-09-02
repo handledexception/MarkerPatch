@@ -90,13 +90,42 @@ static void ReadConfig()
 	ControllerHelper::SetGyroCalibrationPersistence(GyroCalibrationPersistence);
 }
 
+// Dead Space 1 gets only the features verified against its binary. Everything else
+// still targets DS2 code and would either fail its signature scan or, worse, patch
+// the wrong bytes. See PLAN.md for the port status of each feature.
+static void InitDeadSpace1()
+{
+	// Fixes
+	ApplyFixSaveStringHandling();
+	ApplyVSyncRefreshRateFix();
+
+	// General
+	ApplyASILoader();
+	ApplySkipIntro();
+
+	// Input
+	ApplyDisableKeyboardHook();
+
+	// Graphics
+	ApplyTextureFiltering();
+}
+
 static void Init()
 {
 	ReadConfig();
 
+	LogHelper::Log("Init: %s  module=0x%p", GameName(g_State.game), g_State.GameModule);
+
 	if (CheckLAAPatch)
 	{
 		LAAPatcher::PerformLAAPatch(GetModuleHandleA(NULL), CheckLAAPatch != 2);
+	}
+
+	if (g_State.game == Game::DS1)
+	{
+		InitDeadSpace1();
+		LogHelper::Log("Init complete");
+		return;
 	}
 
 	// Fixes
@@ -148,8 +177,11 @@ static void Init()
 	ApplyResolutionHook();
 	ApplyD3D9ApiMidHook();
 	ApplyASILoader();
+
+	LogHelper::Log("Init complete");
 }
 
+// Dead Space 2 trigger: the game opens its own registry key early in startup
 safetyhook::InlineHook regOpenKeyHook;
 static LSTATUS WINAPI RegOpenKeyExW_Hook(HKEY hKey, LPCWSTR lpSubKey, DWORD ulOptions, REGSAM samDesired, PHKEY phkResult)
 {
@@ -157,10 +189,29 @@ static LSTATUS WINAPI RegOpenKeyExW_Hook(HKEY hKey, LPCWSTR lpSubKey, DWORD ulOp
 	if (!g_State.isInit && samDesired == 0x20019 && lpSubKey && wcscmp(lpSubKey, L"SOFTWARE\\EA Games\\Dead Space 2") == 0)
 	{
 		g_State.isInit = true; // Make sure to never enter this condition again
+		g_State.game = Game::DS2; // The key itself is proof, even if detection by name failed
 		g_State.GameModule = GetModuleHandleA(NULL);
 		(void)regOpenKeyHook.disable();
 		Init();
 	}
 
 	return regOpenKeyHook.stdcall<LSTATUS>(hKey, lpSubKey, ulOptions, samDesired, phkResult);
+}
+
+// Dead Space 1 trigger: it has no game-specific registry key and imports RegOpenKeyExA
+// rather than the W variant above, so the registry approach cannot fire. Direct3DCreate9
+// is called exactly once at startup, after the module is fully loaded and well before
+// gameplay, which is all the patches need.
+safetyhook::InlineHook direct3DCreate9Hook;
+static IDirect3D9* WINAPI Direct3DCreate9_Hook(UINT SDKVersion)
+{
+	if (!g_State.isInit)
+	{
+		g_State.isInit = true;
+		g_State.GameModule = GetModuleHandleA(NULL);
+		(void)direct3DCreate9Hook.disable();
+		Init();
+	}
+
+	return direct3DCreate9Hook.stdcall<IDirect3D9*>(SDKVersion);
 }

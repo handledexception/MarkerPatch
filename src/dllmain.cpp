@@ -63,7 +63,29 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 				SystemHelper::LoadProxyLibrary();
 			}
 
-			regOpenKeyHook = HookHelper::CreateHookAPI(L"advapi32.dll", "RegOpenKeyExW", &RegOpenKeyExW_Hook);
+			g_State.game = DetectGame(GetModuleHandleA(NULL));
+
+			IniHelper::Init();
+			LogHelper::Init(IniHelper::ReadInteger("Debug", "LogFile", 0) == 1);
+			LogHelper::Log("MarkerPatch loaded into %s (UAL=%d)", GameName(g_State.game), g_State.isUALPresent);
+
+			if (g_State.game == Game::DS1)
+			{
+				// The exe imports d3d9.dll, so the loader has normally mapped it before any
+				// DllMain runs; load it ourselves only if that assumption fails.
+				if (!GetModuleHandleW(L"d3d9.dll"))
+				{
+					LoadLibraryW(L"d3d9.dll");
+				}
+
+				direct3DCreate9Hook = HookHelper::CreateHookAPI(L"d3d9.dll", "Direct3DCreate9", &Direct3DCreate9_Hook);
+			}
+			else
+			{
+				// DS2, or an unrecognised executable: the DS2 registry key check inside the
+				// hook is the real gate, so an unknown game simply never initialises.
+				regOpenKeyHook = HookHelper::CreateHookAPI(L"advapi32.dll", "RegOpenKeyExW", &RegOpenKeyExW_Hook);
+			}
 			break;
 		}
 		case DLL_PROCESS_DETACH:
