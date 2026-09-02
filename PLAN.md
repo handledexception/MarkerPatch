@@ -112,13 +112,13 @@ would need substantial new DS1-specific data; revisit only after the phases in �
 
 | Feature | Source | Sigs | DS1? | Port status | Notes |
 |---|---|---|---|---|---|
-| **HavokPhysicsFix** | `Fixes/HavokPhysicsFix.cpp` | 8 | **YES** | 1 confirmed + 4 candidates | Anchor confirmed; strong BSim candidates for the rest (§5a, §6) |
+| **HavokPhysicsFix** | `Fixes/HavokPhysicsFix.cpp` | 8 | **YES** | **layer 2 ported (4/8 hooks)** — in-game "improved" | Solver-scale + three constraint hooks live on DS1, all confirmed by decompile. SSE mid-hooks not ported. Acceptance test = Chapter 1 Ishimura arrival (loose props); pending (§6) |
 | **FixSaveStringHandling** | `Fixes/FixSaveStringHandling.cpp` | 2 | **YES** | **✅ verified in-game** | Both sigs 100% identical. A/B on DS1: long-named decoy save crashes vanilla (`0xC000000D`), reaches menu with fix (§8a) |
 | **FilterInputDevices** | `Input/FilterInputDevices.cpp` | 2 | **YES** | 1/2 resolved | `IsXInputDevice` 98% identical |
 | **LAA patch** | `include/LAAPatcher.hpp` | 0 | **YES** | ready | DS1 lacks the LAA flag; no sigs needed |
 | **ASILoader** | `General/ASILoader.cpp` | 0 | **YES** | ready | Game-agnostic |
 | **VSyncRefreshRateFix** | `Fixes/VSyncRefreshRateFix.cpp` | 2 | **YES** | **✅ verified by measurement** | DS1 has DS2's exact 30 FPS VSync lock (limiter constant 16.667 ms × 2). DS1-specific port: entry mid-hook on the limiter syncs the constant to the `Window.Hz` setting. Measured: Hz=60 → 60.0 fps, Hz=30 → 30.0 fps on a 60 Hz display (§7a) |
-| **RawMouseInput** | `Input/RawMouseInput.cpp` | 12 | **likely** | 0/12 — **hardest** | DS1's FPS-dependent mouse accel is its most-reported bug, so highest user value. But BSim found no good matches (§5a): camera/aiming logic genuinely differs between the games. Needs original RE, not a port |
+| **RawMouseInput** | `Input/RawMouseInputDS1.cpp` | — | **YES** | **✅ verified in-game (player camera)** | Original DS1 implementation: DirectInput mouse deltas (hooked at `DirectInput8Create` → `CreateDevice` → `GetDeviceState/Data`) injected at `UpdatePlayerCamera`'s `ApplyCameraRotation` call. "Feels the right speed relative to the menus" at 480 fps. Aiming/scripted cameras, dead-zone early-return, invert X/Y still open (§7a) |
 | **DisableKeyboardHook** | `Input/DisableKeyboardHook.cpp` | 1 | **YES** | **✅ verified in-game** | DS1-specific: both `SetWindowsHookExA` call sites neutered (`+0x29`, `+0xA9`). Windows key / Alt-Tab confirmed working in DS1 (§7a) |
 | **UseSDLControllerInput** | `Input/UseSDLControllerInput.cpp` | 0 | **likely** | ready? | DS1 imports `XINPUT1_3`; SDL layer is game-agnostic |
 | **FixAutomaticWeaponFireRate** | `Fixes/FixAutomaticWeaponFireRate.cpp` | 2 | **likely** | 0/2 | DS1 has automatic weapons; same cooldown pattern expected |
@@ -317,6 +317,50 @@ function-level matching cannot address them. Locate their containing functions f
 then re-derive the offsets against Havok 5.5 — the `hkClass` reflection data above is the
 intended route.
 
+### Layer 2 ported (2026-09-02): the four function-level hooks
+
+All three BSim candidates were confirmed by decompile against the DS2 originals — same
+parameter lists, same struct offsets (`+0x1C` for the constraint term the hooks divide,
+`+0x20/+0x30/+0x34` in the constraint info, `[3]`/`[9]` in the solver info) — differing
+only in codegen (x87 in DS1). The existing DS2 hook functions are reused unchanged;
+only the signatures are per-game:
+
+| Hook | DS1 signature | DS1 VA |
+|---|---|---|
+| `InitializePhysicsSolverParameters` | `8B 44 24 04 D9 80 0C 01 00 00 D9 19` (same as DS2) | `0x00846500` |
+| `BuildContactConstraintJacobian` | `55 8B EC 83 E4 F0 81 EC 24 01 00 00 53 56 57 D9 EE` | `0x00877320` |
+| `Build1DAngularConstraintJacobian` | `55 8B EC 83 E4 F0 83 EC 34 8B 4D 08 53` | `0x0086AF80` |
+| `SolveBallSocketChainConstraints` | `55 8B EC 83 E4 F0 81 EC B4 00 00 00 8B 45 08 D9 40 1C` | `0x0086EE40` |
+
+`ProcessEntityDeath` (DS1 candidate `0x0047A070` — same structure, but its death event id
+is `0x10`/`0x11` where DS2's is `0x16`/`0x17`) and `MainLoop` (DS1 `0x004242A0` is only the
+message pump) feed the DS2 mid-hooks and are not needed until layer 3.
+
+**Observation from the first run:** at the main menu with VSync off, the DS1 solver is
+stepped with `dt` = 2–6 ms (167–500 Hz) — the physics step is coupled to the frame time
+exactly as in DS2, and the game runs far above 60 fps in windowed mode once its own
+limiter is off. `frameTimeScale` reached 16.7 at 500 Hz. DS2 regression: all eight
+physics signatures still resolve.
+
+**In-game (Paul, 2026-09-02): "seems improved"** with layer 2 alone, at uncapped
+windowed frame rates from a Chapter 2 save. Not yet a definitive result: the worst case
+in DS1 is the **Chapter 1 arrival on the Ishimura, where suitcases and boxes fly around
+the ship** — many light loose props under contact constraints, i.e. exactly what the
+`BuildContactConstraintJacobian` scaling and the un-ported impulse damper govern. That
+scene is the acceptance test for physics, and it needs a fresh game.
+
+Fast ways to reach it next time, rather than sitting through the intro:
+- `Dead Space.exe -gameflow ch01_fit` loaded `vid003-spine.vp6` (a chapter cinematic)
+  instead of a menu video, so the developer switch appears to start a flow directly. Add
+  `-playerdontdie`. Unverified on screen.
+- The main-menu build (state `0x10`) always creates a `"DebugLoad"` item first; its
+  visibility hinges on `FUN_0041fb80(-1)`, presumably a developer flag. Enabling it may
+  expose a chapter/checkpoint loader — worth one look.
+
+If the intro scene still misbehaves, the next step is layer 3: re-deriving the impulse
+damper / constraint error scaler / timestep limiter inside DS1's x87 solver, starting
+from the now-known containing functions.
+
 ### Havok reflection metadata is available
 
 DS1 embeds Havok `hkClass` reflection data, including the member-name strings `buildJacobianFunc`, `solverTau`, `solverDamp`, `solverIterations`, `solverMicrosteps`, `hkpBallSocketConstraintAtom`, `hkpBallSocketChainData`, `correspondingAngLimitSolverResultOffset`.
@@ -499,6 +543,53 @@ For a direct-to-save boot the alternative is the **Continue** handler `FUN_00615
 it sets menu state `0x15` and fires the `"LoadSlot1"` UI action via
 `FUN_0061e7c0(frontend, "LoadSlot1", 0)`.
 
+### `RawMouseInput` — DS1 needs its own plumbing
+
+BSim found no usable correspondence for DS2's twelve hooks, but the mechanism was
+recovered directly (2026-09-02). DS1 reads the mouse through **DirectInput only** (it
+imports no raw-input APIs, unlike DS2 which already uses `GetRawInputData`), and its
+`UpdatePlayerCamera` (`0x00438070`) treats the mouse like an analogue stick: the
+per-frame delta is normalised into a ±1 axis with a dead zone (`FUN_00435d40`, dead zones
+at `camera+0x128/+0x130`), then converted to a rotation *rate* × frame time. Both halves
+shrink with frame rate, which is why 480 fps feels far slower than 8× slower than 60.
+
+`ApplyCameraRotation` is `0x00521260` — same body as DS2's (`angles[0..2] += pitch/yaw/
+roll`, rebuild matrix), mode flag in `EAX` rather than on the stack. The player camera
+calls it once, at `UpdatePlayerCamera + 0x871` (`0x004388E1`), cdecl, with
+`[esp]=camera, [esp+4]=pitch, [esp+8]=yaw, [esp+0xC]=roll, EAX=0`.
+
+**First attempt — raw input via `RegisterRawInputDevices` + `WH_GETMESSAGE` — and why
+it cannot work on DS1.** Windows keeps **one raw-input registration per process per
+device type**; a later `RegisterRawInputDevices` for the mouse *replaces* the earlier one.
+DirectInput registers raw mouse input internally for its own hidden window, so our
+registration hijacked it: the game's mouse went dead after load until an alt-tab made
+DirectInput re-acquire and re-register — which then silenced ours. Counters from a full
+play session: `WM_INPUT seen 0`, `camera call site reached 12503`, `overridden 0`. The
+call site was right; the capture was fighting the game. (DS2 has no such problem because
+DS2 itself reads `WM_INPUT` and uses no DirectInput mouse.)
+
+**Shipped design — read the deltas from DirectInput itself.** `Input/RawMouseInputDS1.cpp`:
+
+| Piece | How |
+|---|---|
+| Capture | Inline-hook `DirectInput8Create` **from `DllMain`** (device creation can precede the D3D trigger; in proxy mode the target is the real function `LoadProxyLibrary` resolved, under an ASI loader the loader's export). On the returned `IDirectInput8`, hook `CreateDevice` (vtable 3); when `rguid == GUID_SysMouse`, remember the device and hook its `GetDeviceState` (vtable 9) and `GetDeviceData` (vtable 10) — shared class functions, so the hooks filter on the device pointer. Relative `lX/lY` (or buffered `DIMOFS_X/Y` items) accumulate into `g_State.rawMouseDeltaX/Y` |
+| Per-frame tick | Inline hook on the message pump `FUN_004242a0` (`83 EC 1C 53 56 8B 35 ?? ?? ?? ?? 6A 03`): snapshot and clear, so nothing accumulates while no camera consumes it |
+| Injection | `create_mid` at the `call` instruction (`UpdatePlayerCamera + 0x871`): takes the frame snapshot plus anything read since, overwrites `[esp+4]`/`[esp+8]` with `raw × sensitivity / 625` (yaw negated), pitch clamped to ±π/3 as DS2 does; skipped when the delta is zero so stick input passes through |
+| Sensitivity | Live from the `Control.MouseSensitivity` global (`0x00E88E34`, via the loader's `movss` store, signature `D9 05 ?? ?? ?? ?? B8 ?? ?? ?? ?? D9 1C 24 F3 0F 11 05`); `0.005` fallback if zero |
+
+Confirmed live (2026-09-02): `DirectInput mouse device` caught at creation, DI reads
+flowing, camera hook firing with real deltas (`raw (-8, -5) → yaw 0.0031 pitch -0.0020`
+at slider 0.246). No raw-input registration, so the dead-mouse-until-alt-tab bug is gone.
+
+**Design rule (Paul):** this feature injects the game's own sensitivity setting and nothing
+more. Any per-axis scaling or acceleration shaping must be a separate, explicit patch
+setting, not folded into `RawMouseInput`.
+
+Known gaps for later: only the player camera is covered (aiming and scripted modes still
+use the game path); the game's early return when its own dead-zoned delta is zero means
+very small motions may be dropped (the community fix's "no dead zone" point); invert
+X/Y settings not honoured yet; DS1's camera momentum remains by design.
+
 ### `VSyncRefreshRateFix` — same limiter, no `SetHz`
 
 **Ported and verified by measurement on DS1 (2026-09-02)** — `Fixes/VSyncRefreshRateFix.cpp`,
@@ -542,6 +633,51 @@ Implementation:
 | 2 | 30 | 16.667 (unchanged) | **30.0 fps** |
 
 The fix only engages when the game's VSync is on (the limiter is otherwise inactive).
+
+**How DS1 actually implements VSync** (from `FUN_007bf670`, the `D3DPRESENT_PARAMETERS`
+builder; the struct is a global at `0x00EF5BA8`, passed to `CreateDevice` in
+`FUN_007bfbf0` and `Reset` in `FUN_007c0420`):
+
+| Mode | `PresentationInterval` | `FullScreen_RefreshRateInHz` | Software limiter |
+|---|---|---|---|
+| windowed | `IMMEDIATE` (`0x80000000`) | 0 | **always on** (guard set after Create/Reset) |
+| fullscreen, VSync off | `caps & IMMEDIATE` | Hz | on unless interval has bit 2 |
+| fullscreen, VSync on | **`INTERVAL_TWO` if the device supports it**, else `INTERVAL_ONE` | Hz | off when `TWO` |
+
+So in windowed mode the limiter *is* the VSync, which is why the ported fix works there.
+In fullscreen with VSync on, DS1 deliberately presents every **second** vblank — the other
+half of the "VSync locks to 30 fps" bug (60 Hz ÷ 2), and 240 on a 480 Hz panel. A
+complete fix must also override the interval to `ONE` at the two push sites:
+`68 ?? ?? ?? ?? 52 8B 15 ?? ?? ?? ?? 52` (CreateDevice, `0x007BFCD6`) and
+`68 ?? ?? ?? ?? 50 FF D2 83 3D ?? ?? ?? ?? 00` (Reset, `0x007C0439`). Not yet done.
+
+Note also that the solver `dt` logged by `HavokPhysicsFix` at the main menu (2–6 ms) is
+**not** the frame time — the menu paced at 60 fps in the same run — so Havok substeps
+there; do not read those lines as a frame-rate measurement.
+
+**480 Hz result (2026-09-02, RTX 5090, 2560×1440 @ 479 Hz desktop, game windowed
+1920×1200).** Frame pacing measured in the frontend update (once per frame, independent
+of the limiter):
+
+| `Window.VSync` | `Window.Hz` | Limiter | Measured at menu |
+|---|---|---|---|
+| on | 480 | called, constant → 1.042 ms | **462–480 fps** |
+| off | 480 | **not called at all** | **60.0 fps**, flat |
+
+So with the fix, "VSync on" now means "the selected refresh rate", exactly as on DS2.
+
+**The flat 60 with VSync off was not the game.** It was an **NVIDIA driver profile
+frame-rate limiter** on `Dead Space.exe` — the long-standing PCGamingWiki advice for DS1
+is "cap at 60 in the NVIDIA Control Panel", and it had been applied and forgotten. Paul
+removed it and the game runs at 480 Hz. The driver cap throttles the no-VSync path
+regardless of what the game does; run B above measured 480 because the profile change
+landed between the two runs. Every earlier "60.0 with the limiter disabled" reading in
+this document was that driver cap, not windowed D3D presentation and not a game timer.
+
+Lesson for future spelunkers: **check the GPU driver's per-application profile before
+hunting for an in-game cap.** A flat, exact 60.0 that survives every game-side change is
+the signature of a driver limiter. The frontend pacing telemetry (§7a, `SkipIntro`
+hook) is the quick way to measure real frame time independently of the game's limiter.
 
 ---
 
