@@ -327,6 +327,10 @@ paket-files/
 __pycache__/
 *.pyc
 
+# Generated output from tools/ analysis scripts
+tools/sigtable.json
+tools/*.csv
+
 # Cake - Uncomment if you are using it
 # tools/**
 # !tools/packages.config
